@@ -1,0 +1,51 @@
+#!/bin/bash
+#SBATCH --job-name=nbm_test
+#SBATCH --output=logs/nbm_test_%j.log
+#SBATCH --nodes=4
+#SBATCH --time=00:10:00
+#SBATCH --ntasks-per-node=4
+######SBATCH -ntasks=4
+#SBATCH --cpus-per-task=36
+#SBATCH --account=mdl-sti
+######SBATCH --array=1-10
+#SBATCH --mem-per-cpu=2gb
+
+
+echo "activating env"
+source activate unet_gpu
+
+# rendezvous stuff
+nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
+nodes_array=($nodes)
+head_node=${nodes_array[0]}
+head_node_ip=$(hostname --ip-address)
+echo Node IP: $head_node_ip
+
+# explicitly set network comms tags
+export GLOO_SOCKET_IFNAME=cluster0.2102
+export TP_SOCKET_IFNAME=cluster0.2102
+export NCCL_SOCKET_IFNAME=ib0 
+export NCCL_IB_DISABLE=0
+
+
+DATA='/scratch4/STI/mdl-sti/Sidney.Lower/data/blend/1h_qpf_v5/202511/1115/'
+cycle='t00z'
+domain='co'
+grid_res='2p5'
+
+export FORT20="precip06_filelist" # FILE LIST (INPUT)
+export FORT11='/scratch4/STI/mdl-sti/Eric.Engle/FROM_scratch1_mdl/gitrepos/blend/fix/precip/blend.precip_const.co.2p5.nc'
+export FORT50="blend.${cycle}.qmd_qpf01.${domain}.${grid_res}.nc" # NETCDF OUTPUT#
+export FORT51="blend.${cycle}.qmd_qpf01.${domain}.grib2"          # GRIB2 OUPUT#
+export FORT52="blend.${cycle}.qmd_qpf01.${domain}.tdlp"           # TDLPACK OUTPUT#
+
+echo "time start"
+date
+
+
+echo "running script"
+srun torchrun --nnodes=4 --nproc_per_node=2 --rdzv_id=$RANDOM --rdzv_backend=c10d --rdzv_endpoint=$head_node_ip:25678 blend_precip_post_qmdqpf01.py
+
+
+echo "time done"
+date
