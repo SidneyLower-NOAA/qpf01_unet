@@ -47,6 +47,14 @@ def grid_padding(image, divisor=32):
     return padded_image
 
 
+def get_grid_info(data_file):
+    temp = xr.open_dataset(data_file).load()
+    latitude = temp.latitude.data
+    longitude = temp.longitude.data
+
+    return latitude, longitude
+
+
 
 def batch_collate_fn(batch):
     
@@ -92,12 +100,15 @@ class NBM_dataset(Dataset):
         start_file = self.fpath[idx]
 
         try:
-            features = xr.open_dataset(start_file, engine='grib2io', filters=dict(productDefinitionTemplateNumber=8))
+            #features = xr.open_dataset(start_file, engine='grib2io', filters=dict(productDefinitionTemplateNumber=8))
+            features = xr.open_dataset(start_file,engine='grib2io', filters=dict(productDefinitionTemplateNumber=8, duration=pd.Timedelta(hours=6)))
         except:
             print("file corrupted / doesn't exist. skipping")
             return None
             
         valid_date = pd.to_datetime(features.validDate.values)
+        # why doesn't pd time delta not have an hours attr???
+        lead_time = round(pd.Timedelta(features.leadTime.values).total_seconds() / 3600)
         feature_slice = features.APCP.values
     
         # construct mask just indicating where valid rain pixels are
@@ -105,10 +116,7 @@ class NBM_dataset(Dataset):
 
         # log transform and scale QPE06
         logp1_feature = np.log1p(feature_slice)
-        unscaled_qpf06 = torch.tensor(logp1_feature, dtype=torch.float32).unsqueeze(0)
         normalized_feature = (logp1_feature - self.precip_mean) / self.precip_std
-
-        # Convert the time-varying slice to a tensor and add channel dim
         feature_tensor = torch.tensor(normalized_feature, dtype=torch.float32).unsqueeze(0)
 
         # add timing tensors
@@ -127,10 +135,13 @@ class NBM_dataset(Dataset):
 
         # add padding to ensure division by 2 all the way down
         padded_feature = grid_padding(combined_features, 2**self.n_pooling_layers)
-        padded_qpe = grid_padding(unscaled_qpf06, 2**self.n_pooling_layers)
+
+        # lastly, we'll need to save the raw QPF06 to apply to the QPF01 proportions later
+        unscaled_qpf06 = torch.tensor(feature_slice, dtype=torch.float32).unsqueeze(0)
+        padded_qpf = grid_padding(unscaled_qpf06, 2**self.n_pooling_layers)
 
 
-        return padded_feature, padded_qpe, time_vector, valid_date.strftime("%Y%m%d%H")
+        return padded_feature, padded_qpf, time_vector, lead_time
 
 
 def process_nbm_data(data_paths, constants_file_path, cpu_rank, batch_size=1, num_workers=1, num_pool_layers=5):
@@ -143,28 +154,100 @@ def process_nbm_data(data_paths, constants_file_path, cpu_rank, batch_size=1, nu
 
     return data_loader
 
-def prop_to_qpf(hourly_proportions, lead_time, qpf06, lat, lon, valid_dates, output_path):
+
+def proportions_to_qpf(model_output, qmd_qpf06, ny, nx):
 
 
-    # model output shape is [N samples, 6, H_padded, W_padded]
-    batch_size = np.shape(hourly_proportions)[0]
-    ny, nx = np.shape(lat)
+    # model output shape is [N lead times, 6, H_padded, W_padded]
+    # remove padded pixels
+    model_output_to_conus = model_output[:,:,:ny,:nx]
+    qpf06_to_conus = qmd_qpf06[:,:,:ny,:nx]
+
+    # proportions --> QPF01
+    qpf01 = model_output_to_conus * qpf06_to_conus
+
+    # shape [N lead times, 6 hourly amounts, ny, nx]
+    return qpf01
+
+
+
+"""
+
+TO DO:::::::
+
+make sure we're conforming to the prodgen/grid yaml config files...
+look at Eric's qpf prodgen script to see how he wrote the grib2
+can we not use xarray to write?
+
+
+
+
+
+
+
+"""
+    
+
+def write_to_NetCDF(qpf01, lat_grid, lon_grid, init_date, lead_times, output_path):
+
+    qpf06_leads = lead_times.numpy()
+
+    # transform QPF06 leads to QPF01 leads (e.g., fill in the hours)
+    qpf01_leads = []
+    for lt in qpf06_leads:
+        qpf01_leads.append(np.array([lt]) - np.arange(5, -1, -1))
+
+    qpf01_leads = [pd.Timedelta(hours=item) for item in qpf01_leads]
+
+    # [1 (init date), 276 (hourly lead times), ny, nx]
+    qpf01_expand = qpf01.reshape(6*len(qp01_leads), ny, nx).unsqueeze(0)
+
+    time_dim = pd.to_datetime(str(init_date), format="%Y%m%d%H")
+
+    #write to zarr via xarray dataset
+    ds = xr.Dataset(data_vars=dict(
+                                init_date=(["time"], 
+                                           init_date, 
+                                           {"standard_name": "forecast_reference_time", 
+                                            "long_name": "Model initialization date in YYYYMMDDHH format"}),
+                                pred_qpe01=(["time","lead_time", "ya", "xa",], 
+                                            qpf01_expand, 
+                                            {"standard_name": "precipitation_amount", 
+                                             "long_name": "1-Hour Quantitative Precipitation Forecast (QPF)", "units": "kg m-2"})),
+                    
+                    coords=dict(
+                                time=(["time"], time_dim, {"standard_name": "time"}),
+                                lead_time=(["lead_time"], qpf01_leads, {"standard_name": "forecast_period", "long_name": "Model forecast ending lead time"}),
+                                latitude=(["ya", "xa"], lat_grid, {"standard_name": "latitude", "units": "degrees_north"}),
+                                longitude=(["ya", "xa"], lon_grid, {"standard_name": "longitude", "units": "degrees_east"})),
+
+    
+    ds.to_netcdf(output_path,mode='w')
+    
+    return
+
+def write_to_GRIB2(model_output, qmd_qpf06, lat_grid, lon_grid, valid_dates, output_path):
+
+
+    # model output shape is [N lead times, 6, H_padded, W_padded]
+    nleads = np.shape(model_output)[0]
+    ny, nx = np.shape(lat_grid)
     
     qpf06[qpf06 <= 0.254] = 0.0
 
     # remove padded pixels
-    hourly_proportions_to_conus = hourly_proportions[:,:,:ny,:nx]
-    qpf06_to_conus = qpf06[:,:,:ny,:nx]
+    model_output_to_conus = model_output[:,:,:ny,:nx]
+    qpf06_to_conus = qmd_qpf06[:,:,:ny,:nx]
 
-    # no longer tensor
-    pred01 = torch.exp(hourly_proportions_to_conus).cpu().numpy() * torch.expm1(qpf06_to_conus).cpu().numpy()
-    pred01 = np.nan_to_num(pred01, 0.0)
-    new_pred01 = pred01.reshape(6*batch_size, ny, nx)
+    # proportions --> QPF01
+    qpf01 = model_output_to_conus.cpu().numpy() * torch.expm1(qpf06_to_conus).cpu().numpy()
+    qpf01 = np.nan_to_num(qpf01, 0.0)
+    qpf01_expand = qpf01.reshape(6*nleads, ny, nx)
     
-    valid_dates_datetime = []
+    valid_dates_to_datetime = []
     for b in valid_dates:
         for i in range(5, -1, -1):
-            valid_dates_datetime.append(pd.to_datetime(b, format="%Y%m%d%H") - pd.Timedelta(hours=i))
+            valid_dates_to_datetime.append(pd.to_datetime(b, format="%Y%m%d%H") - pd.Timedelta(hours=i))
 
 
     #write to zarr via xarray dataset
@@ -181,5 +264,3 @@ def prop_to_qpf(hourly_proportions, lead_time, qpf06, lat, lon, valid_dates, out
                  mode='w', consolidated=True,zarr_format=2)
     
     return
-
-    
