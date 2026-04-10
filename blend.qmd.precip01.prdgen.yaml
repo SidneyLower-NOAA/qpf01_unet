@@ -1,0 +1,81 @@
+---
+# ----------------------------------------------------------------------------------------  
+# Product Generation Configuration for QMD PRECIP01
+# ----------------------------------------------------------------------------------------  
+
+# ----------------------------------------------------------------------------------------  
+# Global config for GRIB2 Encoding
+# ----------------------------------------------------------------------------------------  
+grib2_encoding:
+  # -- Section 0
+  discipline: 0 # Meteorological Products
+  # -- Section 1
+  originatingCenter: 7
+  originatingSubCenter: 14
+  masterTableInfo: 1
+  localTableInfo: 0
+  significanceOfReferenceTime: 1
+  productionStatus: 0
+  typeOfData: 1
+  # -- Section 4
+  parameterCategory: 1
+  parameterNumber: 8
+  typeOfFirstFixedSurface: 1
+  scaleFactorOfFirstFixedSurface: 0
+  scaledValueOfFirstFixedSurface: 0
+  typeOfSecondFixedSurface: 255
+  scaleFactorOfSecondFixedSurface: 0
+  scaledValueOfSecondFixedSurface: 0
+  typeOfGeneratingProcess: 2
+  generatingProcess: 104
+  backgroundGeneratingProcessIdentifier: 255
+  hoursAfterDataCutoff: 65535
+  minutesAfterDataCutoff: 255
+  unitOfForecastTime: 1
+  valueOfForecastTime: 0
+  # -- Section 5
+  dataRepresentationTemplateNumber: 3
+  numberOfPackedValues: 0 # Filled in script
+  typeOfValues: 0
+  refValue: 0
+  binScaleFactor: 0
+  decScaleFactor: 3
+  nBitsPacking: 0
+  groupSplittingMethod: 1
+  typeOfMissingValueManagement: 1
+  priMissingValue: 9999.0
+  secMissingValue: null
+  spatialDifferenceOrder: 2
+  # -- Section 6
+  bitMapFlag: 255
+
+
+netcdf_encoding:
+  zlib: True       # Use zlib compression
+  shuffle: True    # Use bit shuffling
+  complevel: 4     # Compression factor
+  missing_value: -99.99
+  _FillValue: -99.99
+
+
+tdlpack_encoding:
+  dd: 66
+  pmiss: 9999.0
+  smiss: 0.0
+
+
+qpf:
+  grib2_encoding: # Use grib2io attribute names
+    productDefinitionTemplateNumber: 8
+    numberOfTimeRanges: 1
+    numberOfMissingValues: 0
+    statisticalProcess: 1
+    typeOfTimeIncrementOfStatisticalProcess: 2
+    unitOfTimeRangeOfStatisticalProcess: 1
+    timeRangeOfStatisticalProcess: 1
+    unitOfTimeRangeOfSuccessiveFields: 1
+    timeIncrementOfSuccessiveFields: 0
+  tdlpack_encoding:
+    cccfff: 243210
+    decimal_scale_factor: 3
+    plain: "BLEND 1-H PCP AMT"

@@ -4,6 +4,9 @@ import xarray as xr
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import copy, yaml
+import grib2io
+import pytdlpack
 
 """
 Data processing utitlies for QPF01 CNN.
@@ -14,7 +17,7 @@ for safe handling in the UNet convolution layers. QPF values are scaled with cac
 2019-2025 training dataset. Valid date information is also extracted and used as an auxillary input for the
 UNet decoding layers. 
 
-(((to do))): QPF01 grids are saved to NetCDF and GRIB2.
+QPF01 grids are saved to NetCDF, GRIB2, and/or TDLPack.
 
 
 """
@@ -153,44 +156,12 @@ def process_nbm_data(data_paths, constants_file_path, cpu_rank, batch_size=1, nu
 
 
     return data_loader
+ 
 
-
-def proportions_to_qpf(model_output, qmd_qpf06, ny, nx):
-
-
-    # model output shape is [N lead times, 6, H_padded, W_padded]
-    # remove padded pixels
-    model_output_to_conus = model_output[:,:,:ny,:nx]
-    qpf06_to_conus = qmd_qpf06[:,:,:ny,:nx]
-
-    # proportions --> QPF01
-    qpf01 = model_output_to_conus * qpf06_to_conus
-
-    # shape [N lead times, 6 hourly amounts, ny, nx]
-    return qpf01
-
-
-
-"""
-
-TO DO:::::::
-
-make sure we're conforming to the prodgen/grid yaml config files...
-look at Eric's qpf prodgen script to see how he wrote the grib2
-can we not use xarray to write?
-
-
-
-
-
-
-
-"""
+def write_to_files(qpf01, init_date, lead_times, config, netcdf_fileout=None, grib2_fileout=None, tdlpack_fileout=None):
     
-
-def write_to_NetCDF(qpf01, lat_grid, lon_grid, init_date, lead_times, output_path):
-
     qpf06_leads = lead_times.numpy()
+    ny, nx = np.shape(lat_grid)
 
     # transform QPF06 leads to QPF01 leads (e.g., fill in the hours)
     qpf01_leads = []
@@ -198,69 +169,189 @@ def write_to_NetCDF(qpf01, lat_grid, lon_grid, init_date, lead_times, output_pat
         qpf01_leads.append(np.array([lt]) - np.arange(5, -1, -1))
 
     qpf01_leads = [pd.Timedelta(hours=item) for item in qpf01_leads]
+    time_dim = pd.to_datetime(str(init_date), format="%Y%m%d%H")
 
     # [1 (init date), 276 (hourly lead times), ny, nx]
     qpf01_expand = qpf01.reshape(6*len(qp01_leads), ny, nx).unsqueeze(0)
+    # and tensor --> numpy for writing
+    qpf01_expand = qpf01_expand.numpy()
 
-    time_dim = pd.to_datetime(str(init_date), format="%Y%m%d%H")
 
-    #write to zarr via xarray dataset
-    ds = xr.Dataset(data_vars=dict(
-                                init_date=(["time"], 
-                                           init_date, 
-                                           {"standard_name": "forecast_reference_time", 
-                                            "long_name": "Model initialization date in YYYYMMDDHH format"}),
-                                pred_qpe01=(["time","lead_time", "ya", "xa",], 
-                                            qpf01_expand, 
-                                            {"standard_name": "precipitation_amount", 
-                                             "long_name": "1-Hour Quantitative Precipitation Forecast (QPF)", "units": "kg m-2"})),
-                    
-                    coords=dict(
-                                time=(["time"], time_dim, {"standard_name": "time"}),
-                                lead_time=(["lead_time"], qpf01_leads, {"standard_name": "forecast_period", "long_name": "Model forecast ending lead time"}),
-                                latitude=(["ya", "xa"], lat_grid, {"standard_name": "latitude", "units": "degrees_north"}),
-                                longitude=(["ya", "xa"], lon_grid, {"standard_name": "longitude", "units": "degrees_east"})),
+    # ====================================================================================
+    # WRITE TO NETCDF
+    # ====================================================================================
+    if netcdf_fileout not None:
+        # missing val for NetCDF is -99.99
+        MISSING_VAL = config['netcdf_encoding']['missing_value']
+        qpf01_expand_netcdf = np.nan_to_num(qpf01_expand, MISSING_VAL)
+
+        # handle meta data stuff
+        lat_grid = config['latitude']
+        lon_grid = config['longitude']
+        qpf_encoding = copy.deepcopy(config['netcdf_encoding'])
+        qpf_encoding['chunksizes'] = (1, 1, ny, nx)
+        qpf_encoding['dtype'] = 'float32'
+        init_date_encoding = dict(dtype="int32")
 
     
-    ds.to_netcdf(output_path,mode='w')
+        #write to netCDF with xarray
+        ds = xr.Dataset(data_vars=dict(
+                                    init_date=(["time"], 
+                                               init_date, 
+                                               {"standard_name": "forecast_reference_time", 
+                                                "long_name": "Model initialization date in YYYYMMDDHH format"}),
+                                    qpf01=(["time","lead_time", "ya", "xa",], 
+                                                qpf01_expand_netcdf, 
+                                                {"standard_name": "precipitation_amount", 
+                                                 "long_name": "1-Hour Quantitative Precipitation Forecast (QPF)", 
+                                                 "units": "kg m-2"})),
+                        
+                        coords=dict(
+                                    time=(["time"], time_dim, {"standard_name": "time"}),
+                                    lead_time=(["lead_time"], qpf01_leads, {"standard_name": "forecast_period", 
+                                                                            "long_name": "Model forecast ending lead time"}),
+                                    latitude=(["ya", "xa"], lat_grid, {"standard_name": "latitude", "units": "degrees_north"}),
+                                    longitude=(["ya", "xa"], lon_grid, {"standard_name": "longitude", "units": "degrees_east"})),
+
+    
+        ds.to_netcdf(netcdf_fileout,mode='w', encoding={"qpf01": qpf_encoding, "init_date": init_date_encoding})
+        print("... Finished writing NetCDF")
+
+    # ====================================================================================
+    # WRITE TO NETCDF
+    # ====================================================================================
+    if grib2_fileout not None:
+        # missing val for GRIB2 is 9999.0
+        MISSING_VAL = config["grib2_encoding"]["priMissingValue"]
+        qpf01_expand_grib2 = np.nan_to_num(qpf01_expand, MISSING_VAL)
+
+
+        g_out = grib2io.open(grib2_fileout, mode="w")
+        msg = create_grib2_message(config, "qpf")
+        msg.refDate = time_dim.to_pydatetime()[0]
+        msg.leadTime = qpf01_leads.to_pytimedelta()[0]
+        msg.data = qpf01_expand_grib2
+        msg.pack()
+        g_out.write(msg)
+
+
+        g_out.close()
+        print("... Finished writing GRIB2")
+
+
+    # ====================================================================================
+    # WRITE TO TDLPACK
+    # ====================================================================================
+    if tdlpack_fileout not None:
+        ID_PAD = [9, 9, 9, 10]
+        
+        # missing val for TDLPack is 9999.0
+        MISSING_VAL = config["tdlpack_encoding"]["pmiss"]
+        qpf01_expand_tdlpack = np.nan_to_num(qpf01_expand, MISSING_VAL)
+
+        t_out = pytdlpack.open(tdlp_fileout, mode="w", format="sequential")
+        ilead = [item.astype('int') for item in qpf01_leads]
+
+        rec = create_tdlpack_record(config, "qpf", init_date, ilead, qpf01_expand_tdlpack)
+        idstr = " ".join([str(i).zfill(z) for i, z in zip(rec.id, ID_PAD)])
+        t_out.write(rec)
+
+        t_out.close()
+
+        print("... Finished writing TDLPack")
+        
+                        
     
     return
 
-def write_to_GRIB2(model_output, qmd_qpf06, lat_grid, lon_grid, valid_dates, output_path):
+
+def create_grib2_message(cfg, msg_type):
+    grib2_attrs = copy.deepcopy(cfg['grib2_encoding'])
+    grib2_attrs.update(cfg[msg_type]['grib2_encoding'])
+    gdtn = grib2_attrs['gridDefinitionTemplateNumber']
+    pdtn = grib2_attrs['productDefinitionTemplateNumber']
+    drtn = grib2_attrs['dataRepresentationTemplateNumber']
+    del grib2_attrs['gridDefinitionTemplateNumber']
+    del grib2_attrs['productDefinitionTemplateNumber']
+    del grib2_attrs['dataRepresentationTemplateNumber']
+
+    msg = grib2io.Grib2Message(gdtn=gdtn, pdtn=pdtn, drtn=drtn)
+    msg.section3[5:] = grib2_attrs['gridDefinitionTemplate']
+    del grib2_attrs['gridDefinitionTemplate']
+    for k, v in grib2_attrs.items():
+        setattr(msg, k, v)
+    msg.bitMapFlag = grib2io.templates.Grib2Metadata(255, table='6.0')
+
+    return msg
 
 
-    # model output shape is [N lead times, 6, H_padded, W_padded]
-    nleads = np.shape(model_output)[0]
-    ny, nx = np.shape(lat_grid)
-    
-    qpf06[qpf06 <= 0.254] = 0.0
 
-    # remove padded pixels
-    model_output_to_conus = model_output[:,:,:ny,:nx]
-    qpf06_to_conus = qmd_qpf06[:,:,:ny,:nx]
-
-    # proportions --> QPF01
-    qpf01 = model_output_to_conus.cpu().numpy() * torch.expm1(qpf06_to_conus).cpu().numpy()
-    qpf01 = np.nan_to_num(qpf01, 0.0)
-    qpf01_expand = qpf01.reshape(6*nleads, ny, nx)
-    
-    valid_dates_to_datetime = []
-    for b in valid_dates:
-        for i in range(5, -1, -1):
-            valid_dates_to_datetime.append(pd.to_datetime(b, format="%Y%m%d%H") - pd.Timedelta(hours=i))
+def read_yaml_config(paths, domain):
+    tmp = {}
+    for path in paths:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+            if data:
+                tmp.update(data)
+    grib2_domain_grid = copy.deepcopy(tmp['grids'][domain])
+    del tmp['grids']
+    config = copy.deepcopy(tmp)
+    config['grib2_encoding'].update(grib2_domain_grid)
+    return config
 
 
-    #write to zarr via xarray dataset
-    ds = xr.Dataset(data_vars=dict(pred_qpe01=(["validDate","y", "x",], new_pred01)),
-                       coords=dict(longitude=(["y", "x"], lon),
-                                   latitude=(["y", "x"], lat),
-                                   validDate=valid_dates_datetime,
-                                  leadTime=pd.Timedelta(hours=lead_time)),
-                      )
+def create_tdlpack_record(cfg, msg_type, idate, ilead, data, thresh=0.0, pct=0, scale=0.0):
+    tdlp_attrs = copy.deepcopy(cfg['tdlpack_encoding'])
+    tdlp_attrs.update(cfg[msg_type]['tdlpack_encoding'])
 
-    ds.validDate.encoding['units'] = 'nanoseconds since 1970-01-01'
-    ds.validDate.encoding['dtype'] = "int64"
-    ds.to_zarr(output_path+f'/qpf01_nbmf{lead_time:03d}_R{gpu_rank}_batch{batch_number}.zarr',
-                 mode='w', consolidated=True,zarr_format=2)
-    
-    return
+    id1, id2, id3, id4 = 0, 0, 0, 0
+    id2 = 0
+    id3 = ilead
+
+    if msg_type == "probabilities":
+        ioper = 1
+        id1 = (tdlp_attrs['cccfff']*1000) + (ioper*100) + tdlp_attrs['dd']
+        iexpon = -2
+        iexpon = abs(iexpon)+50 if iexpon < 0 else abs(iexpon)
+        ithresh = int((thresh*10**(scale*-1))*MM_TO_IN*100)
+        id4 = (ithresh*100000) + (iexpon*1000)
+        plain = tdlp_attrs['plain'].format()
+        data = np.where(
+            np.logical_and(data >= 0, data <= 1),
+            data*100,
+            data
+        )
+    elif msg_type == "percentiles":
+        id1 = (tdlp_attrs['cccfff']*1000) + tdlp_attrs['dd']
+        id2 = pct * 10**4
+        plain = tdlp_attrs['plain'].format(pct=pct)
+        data = np.where(
+            data >= 0,
+            data * MM_TO_IN,
+            data
+        )
+    elif msg_type == "qpf":
+        id1 = (tdlp_attrs['cccfff']*1000) + tdlp_attrs['dd']
+        plain = tdlp_attrs['plain'].format(pct=pct)
+        data = np.where(
+            data >= 0,
+            data * MM_TO_IN,
+            data
+        )
+
+    recid = [id1, id2, id3, id4]
+
+    griddef = pytdlpack.create_grid_definition(name="nbm"+domain)
+
+    rec = pytdlpack.TdlpackRecord(
+        date=idate,
+        id=recid,
+        lead=ilead,
+        plain=plain,
+        missing_value=tdlp_attrs['pmiss'],
+        grid=griddef,
+        data=data.T,
+    )
+    rec.pack(dec_scale=tdlp_attrs['decimal_scale_factor'])
+
+    return rec

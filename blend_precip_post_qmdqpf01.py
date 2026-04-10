@@ -24,22 +24,28 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # UNet Modules
-from data_utils import get_grid_info, process_nbm_data, write_to_NetCDF, write_to_GRIB2
+from data_utils import read_yaml_config, get_grid_info, process_nbm_data, write_to_NetCDF, write_to_GRIB2
 from unet_modules import init_model
 
-
+SCRIPT_NAME = os.path.basename(sys.argv[0])
 local_rank = int(os.environ["LOCAL_RANK"])
 global_rank = int(os.environ["RANK"])
 s = pd.Timestamp.now()
 
+print("-"*60)
+print(f" BEGIN PYTHON SCRIPT {SCRIPT_NAME} - {s}")
+print("-"*60)
+
 ### ------------------------- ###
 ###    Script Args
 ### -------------------------- ###
-const_file = os.environ.get("FORT11")
-nc_filein_list = os.environ.get("FORT20") # list of QMD QPF06 files
-nc_fileout = os.environ.get("FORT50")
-grib2_fileout = os.environ.get("FORT51")
-
+grid_config    = os.environ.get("FORT10")
+prdgn_config   = os.environ.get("FORT11")
+const_file     = os.environ.get("FORT12")
+nc_filein_list = os.environ.get("FORT20")
+nc_fileout     = os.environ.get("FORT50")
+grib2_fileout  = os.environ.get("FORT51")
+tdlp_filtout   = os.environ.get("FORT52")
 
 init_date = int(sys.argv[1])
 
@@ -79,8 +85,12 @@ dropout = 0.0
 
 
 #grid info
-latitude, longitude = get_grid_info(const_file)
-ny, nx = latitude.shape
+config_ = read_yaml_config([grid_yaml_file, prod_yaml_file], domain)
+lat, lon = get_grid_info(const_file)
+config = copy.deepcopy(config_)
+config['latitude'] = lat
+config['longitude'] = lon
+ny, nx = config['latitude'].shape
 
 
 ### ------------------------- ###
@@ -111,6 +121,7 @@ nbm_loader = process_nbm_data(all_files, const_file, local_rank,
 
 n_per_rank = len(nbm_loader)
 print(f"       Rank {global_rank} handling {n_per_rank} lead times.")
+
 ### ------------------------- ###
 ###        Run inference
 ### -------------------------- ###
@@ -130,7 +141,8 @@ with torch.no_grad():
         # generate QPF01 proportions from trained CNN
         outputs_qpf01_prop = ddp_unet(inputs, time_vector)
         # get QPF01 amounts and remove padding from tensors
-        outputs_qpf01 = proportions_to_qpf(outputs_qpf01_prop.detach(), qpf06.detach(), ny, nx)
+        # [N lead times, 6, H_padded, W_padded] --> [N lead times, 6, ny, nx]
+        outputs_qpf01 = nbm_qpf06[:,:,ny,nx] * outputs_qpf01_prop[:,:,ny,nx].detach()
 
         #collect local outputs
         outputs_collated[b] = outputs_qpf01
@@ -161,7 +173,7 @@ if (global_rank == 0):
     ## [16, 3] --> [48]
     all_leads = torch.cat(lead_time_gather_list, dim=0)[:46]
     
-    write_to_NetCDF(all_outputs, latitude, longitude, init_date, all_leads, nc_fileout)
+    write_to_NetCDF(all_outputs, init_date, all_leads, config, nc_fileout)
     write_to_GRIB2(model_output, qmd_qpf06, lat_grid, lon_grid, init_date, lead_times, output_path)
 
 
