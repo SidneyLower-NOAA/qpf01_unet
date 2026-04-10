@@ -5,15 +5,25 @@ Purpose: This program generates a 1-Hour Quantitative Precipitation Forecast (QP
     program are 6-hourly forecasts of QPF06 along with precip grid constants (shape, 
     terrain, facets)
 
-Usage: ./blend_precip_post_qmdqpf01.py
-
-Arguments:
+Usage: ./blend_precip_post_qmdqpf01.py $PDY
 
 Input/Output Files by Env Var:
-  FORT11 = QMD Precipitation constants file (NetCDF)
-  FORT20 = Input Model QMD forecasts file (NetCDF)
-  FORT50 = Output QMD Precipitation QMD file (NetCDF)
-  FORT51 = Output QMD Precipitation QMD file (GRIB2)
+  FORT10 = GRIB2 grid definitions file (YAML)
+  FORT11 = Prodgen meta data definition file (YAML)
+  FORT12 = QMD precipitation constants file (NetCDF)
+  FORT20 = Input model QMD forecasts file (NetCDF)
+  FORT50 = Output QMD precipitation QMD file (NetCDF)
+  FORT51 = Output QMD precipitation QMD file (GRIB2)
+  FORT52 = Output QMD precipitation QMD file (TDLPack)
+
+
+Parallel Setup:
+
+  46 QMD QPF06 lead times
+  3 lead times per Pytorch task
+  16 total tasks (last task will handle just 2 lead times)
+  4 CPUs per task
+  
 """
 
 import pandas as pd
@@ -24,7 +34,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # UNet Modules
-from data_utils import read_yaml_config, get_grid_info, process_nbm_data, write_to_NetCDF, write_to_GRIB2
+from data_utils import read_yaml_config, get_grid_info, process_nbm_data, write_to_files
 from unet_modules import init_model
 
 SCRIPT_NAME = os.path.basename(sys.argv[0])
@@ -43,7 +53,7 @@ grid_config    = os.environ.get("FORT10")
 prdgn_config   = os.environ.get("FORT11")
 const_file     = os.environ.get("FORT12")
 nc_filein_list = os.environ.get("FORT20")
-nc_fileout     = os.environ.get("FORT50")
+netcdf_fileout     = os.environ.get("FORT50")
 grib2_fileout  = os.environ.get("FORT51")
 tdlp_filtout   = os.environ.get("FORT52")
 
@@ -98,8 +108,7 @@ ny, nx = config['latitude'].shape
 ### -------------------------- ###
 if (global_rank == 0):
     print(" ...Loading saved model... ")
-UNET = init_model(in_channels=in_channels, kernel_depth=kernel_depth,pos_emb_dim=pos_emb, 
-                        time_embedding_dim=time_emb, dropout_factor=dropout)
+UNET = init_model(in_channels=in_channels,kernel_depth=kernel_depth,pos_emb_dim=pos_emb,time_embedding_dim=time_emb,dropout_factor=dropout)
 UNET.load_state_dict(saved_state['model_state_dict'])
 ddp_unet = DDP(UNET)
 
@@ -140,6 +149,7 @@ with torch.no_grad():
 
         # generate QPF01 proportions from trained CNN
         outputs_qpf01_prop = ddp_unet(inputs, time_vector)
+        
         # get QPF01 amounts and remove padding from tensors
         # [N lead times, 6, H_padded, W_padded] --> [N lead times, 6, ny, nx]
         outputs_qpf01 = nbm_qpf06[:,:,ny,nx] * outputs_qpf01_prop[:,:,ny,nx].detach()
@@ -159,29 +169,33 @@ output_gather_list = [torch.zeros_like(outputs_collated) for _ in range(dist.get
 lead_time_gather_list = [torch.zeros_like(lead_times_collated) for _ in range(dist.get_world_size())]
 
 
-# Collect everything
+# Collect everything from all ranks
+# Barrier ensures this operation waits for all tasks to get to this point
+# It's actually overkill here since dist.all_gather has an implicit barrier
 dist.barrier()
 dist.all_gather(output_gather_list, outputs_collated)
 dist.all_gather(lead_time_gather_list, lead_times_collated)
 
-# 4. Rank 0 saves the file
+# Master rank saves the file
 if (global_rank == 0):
-    print("... Saving QPF01 to NetCDF & GRIB2...")
+    print("... Saving QPF01 to NetCDF, GRIB2, and/or TDLPack...")
 
-    ## [16, 3, 6, Y, X] -> [48, 6, Y, X], but we only need the 46 valid lead times
-    all_outputs = torch.cat(output_gather_list, dim=0)[:46]
+    ## [16, 3, 6, Y, X] -> [48, 6, Y, X]
     ## [16, 3] --> [48]
-    all_leads = torch.cat(lead_time_gather_list, dim=0)[:46]
+    ## but we only need the 46 valid lead times
+    all_outputs = torch.cat(output_gather_list, dim=0)[:len(all_files)]
+    all_leads = torch.cat(lead_time_gather_list, dim=0)[:len(all_files)]
     
-    write_to_NetCDF(all_outputs, init_date, all_leads, config, nc_fileout)
-    write_to_GRIB2(model_output, qmd_qpf06, lat_grid, lon_grid, init_date, lead_times, output_path)
+    write_to_files(all_outputs, init_date, all_leads, config, netcdf_fileout, grib2_fileout, tdlpack_fileout)
 
 
 f = pd.Timestamp.now()
 delt = ((f - s).total_seconds()) / 60.
-print(" ------------- ")
-print(f"   Total runtime: {delt:.2f} minutes")
-print(" ------------- ")
+
+print("-"*60)
+print(f" FINISHED PYTHON SCRIPT {SCRIPT_NAME} - {f}")
+print(f" TOTAL RUNTIME: {delt:.2f} minutes")
+print("-"*60)
 
 
 
