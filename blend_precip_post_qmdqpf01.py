@@ -27,7 +27,6 @@ Parallel Setup:
 """
 
 import pandas as pd
-from tqdm import tqdm
 import os
 import sys
 import copy
@@ -39,11 +38,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from data_utils import read_yaml_config, get_grid_info, process_nbm_data, write_to_files
 from unet_modules import init_model
 
+s=pd.Timestamp.now()
 SCRIPT_NAME = os.path.basename(sys.argv[0])
-local_rank = int(os.environ["LOCAL_RANK"])
-global_rank = int(os.environ["RANK"])
-s = pd.Timestamp.now()
-
 print("-" * 60)
 print(f" BEGIN PYTHON SCRIPT {SCRIPT_NAME} - {s}")
 print("-" * 60)
@@ -51,6 +47,11 @@ print("-" * 60)
 ### ------------------------- ###
 ###    Script Args
 ### -------------------------- ###
+
+
+local_rank = int(os.environ["LOCAL_RANK"])
+global_rank = int(os.environ["RANK"])
+
 grid_config = os.environ.get("FORT10")
 prdgn_config = os.environ.get("FORT11")
 const_file = os.environ.get("FORT12")
@@ -71,8 +72,10 @@ if global_rank == 0:
 ###  Torch/Parallel Backend
 ### -------------------------- ###
 
+nprocs = int(os.environ.get("OMP_NUM_THREADS", 4))
+    
 dist.init_process_group(backend="gloo")
-torch.set_num_threads(4)
+torch.set_num_threads(nprocs)
 torch.manual_seed(42)
 
 ### ------------------------- ###
@@ -156,10 +159,11 @@ outputs_collated = torch.zeros((n_per_rank, *output_shape))
 lead_times_collated = torch.zeros((n_per_rank))
 b = 0
 with torch.no_grad():
-    for inputs, nbm_qpf06, time_vector, nbm_qpf06_lead_time in tqdm(nbm_loader):
+    for inputs, nbm_qpf06, time_vector, nbm_qpf06_lead_time in nbm_loader:
         if inputs is None:
             continue
 
+	print(f"      Rank {global_rank} processing lead time {nbm_qpf06_lead_time:03d}h")
         # generate QPF01 proportions from trained CNN
         outputs_qpf01_prop = ddp_unet(inputs, time_vector)
 
