@@ -50,12 +50,14 @@ find $DATA -name "blend.$cycle.qmd_precip06.f*.${domain}.grib2" -type f | sort >
 DATAOUT='/lfs/h3/mdl/nbm/noscrub/sidney.lower/data/qpf01_output/${PDY}/'
 mkdir -p $DATAOUT
 
-
-export FORT20=${RUNTIME_DIR}/precip06_filelist # FILE LIST (INPUT)
-export FORT11='/lfs/h3/mdl/nbm/noscrub/sidney.lower/blend/fix/precip/blend.precip_const.co.2p5.nc'
-export FORT50=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.${grid_res}.nc # NETCDF OUTPUT#
-export FORT51=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.grib2          # GRIB2 OUPUT#
-export FORT52=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.tdlp           # TDLPACK OUTPUT#
+FIXblend='/lfs/h3/mdl/nbm/noscrub/sidney.lower/blend/fix/'
+export FORT20=${RUNTIME_DIR}/precip06_filelist                           # INPUT FILE LIST
+export FORT10=blend.qmd.precip01.prdgen.yaml                             # PRODGEN CONFIG -->this will be in fix blend eventually
+export FORT11=$FIXblend/precip/blend.qmd.grib2_grid_defs.yaml            # GRIB2 GRID DEFS 
+export FORT12=$FIXblend/precip/blend.precip_const.co.2p5.nc              # PRECIP CONSTANTS
+export FORT50=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.${grid_res}.nc # NETCDF OUTPUT
+export FORT51=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.grib2          # GRIB2 OUPUT
+export FORT52=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.tdlp           # TDLPACK OUTPUT
 
 #PBS -N qpf01_unet
 #PBS -j oe
