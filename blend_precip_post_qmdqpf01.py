@@ -163,7 +163,7 @@ with torch.no_grad():
         if inputs is None:
             continue
 
-	print(f"      Rank {global_rank} processing lead time {nbm_qpf06_lead_time:03d}h")
+		print(f"      Rank {global_rank} processing lead time {nbm_qpf06_lead_time:03d}h")
         # generate QPF01 proportions from trained CNN
         outputs_qpf01_prop = ddp_unet(inputs, time_vector)
 
