@@ -35,14 +35,27 @@ export MKL_NUM_THREADS=$NCPUS_PER_PROC
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
+
+PDY='20260324'
 cycle='t00z'
 domain='co'
 grid_res='2p5'
-export FORT20="precip06_filelist" # FILE LIST (INPUT)
-export FORT11='/scratch4/STI/mdl-sti/Eric.Engle/FROM_scratch1_mdl/gitrepos/blend/fix/precip/blend.precip_const.co.2p5.nc'
-export FORT50="blend.${cycle}.qmd_qpf01.${domain}.${grid_res}.nc" # NETCDF OUTPUT#
-export FORT51="blend.${cycle}.qmd_qpf01.${domain}.grib2"          # GRIB2 OUPUT#
-export FORT52="blend.${cycle}.qmd_qpf01.${domain}.tdlp"           # TDLPACK OUTPUT#
+RUNTIME_DIR='temp'
+mkdir -p $RUNTIME_DIR
+
+DATA='//lfs/h3/mdl/nbm/noscrub/sidney.lower/data/blend/qpf01/${PDY}/'
+find $DATA -name "blend.$cycle.qmd_precip06.f*.${domain}.grib2" -type f | sort > $RUNTIME_DIR/precip06_filelist
+
+
+DATAOUT='/lfs/h3/mdl/nbm/noscrub/sidney.lower/data/qpf01_output/${PDY}/'
+mkdir -p $DATAOUT
+
+
+export FORT20=${RUNTIME_DIR}/precip06_filelist # FILE LIST (INPUT)
+export FORT11='/lfs/h3/mdl/nbm/noscrub/sidney.lower/blend/fix/precip/blend.precip_const.co.2p5.nc'
+export FORT50=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.${grid_res}.nc # NETCDF OUTPUT#
+export FORT51=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.grib2          # GRIB2 OUPUT#
+export FORT52=$DATAOUT/blend.${cycle}.qmd_qpf01.${domain}.tdlp           # TDLPACK OUTPUT#
 
 #PBS -N qpf01_unet
 #PBS -j oe
@@ -69,5 +82,5 @@ mpirun -np $NTORCH \
     --rdzv_id=job_1 \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    blend_precip_post_qmdqpf01.py $init_date
+    blend_precip_post_qmdqpf01.py $PDY
 
