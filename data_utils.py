@@ -7,7 +7,7 @@ from torch.utils.data.distributed import DistributedSampler
 import copy
 import yaml
 import grib2io
-import pytdlpack
+import tdlpackio
 
 """
 Data processing utitlies for QPF01 CNN.
@@ -312,10 +312,9 @@ def write_to_files(
         t_out = pytdlpack.open(tdlpack_fileout, mode="w", format="sequential")
         ilead = [item.astype("int") for item in qpf01_leads]
 
-        rec = create_tdlpack_record(
-            config, "qpf", init_date, ilead, qpf01_expand_tdlpack
-        )
-        t_out.write(rec)
+        for il in range(len(ilead)):
+            rec = create_tdlpack_record(config, "qpf", init_date, ilead[il], nbmco, qpf01_expand_tdlpack[0,il])
+            t_out.write(rec)
 
         t_out.close()
 
@@ -364,12 +363,22 @@ def create_tdlpack_record(
     tdlp_attrs = copy.deepcopy(cfg["tdlpack_encoding"])
     tdlp_attrs.update(cfg[msg_type]["tdlpack_encoding"])
 
-    id1, id2, id3, id4 = 0, 0, 0, 0
-    id2 = 0
+    id1, id2, id4 = 0, 0, 0
     id3 = ilead
 
     IN_TO_MM = 25.4
     MM_TO_IN = 1.0 / IN_TO_MM
+
+    griddef_co = {
+    "mapProjection": 3,
+    "nx": 2345,
+    "ny": 1597,
+    "latitudeLowerLeft": 19.2290,
+    "longitudeLowerLeft": 126.2766,
+    "standardLatitude": 25.0000,
+    "orientationLongitude": 95.0000,
+    "gridLength": 2539.702881,
+            }
 
     if msg_type != "qpf":
         print("[DATA_UTILS/TDLPACK]: CAN ONLY WRITE OUT QPF RECORDS.")
@@ -380,17 +389,18 @@ def create_tdlpack_record(
 
     recid = [id1, id2, id3, id4]
 
-    griddef = pytdlpack.create_grid_definition(name="nbmco")
+    rec = tdlpackio.TdlpackRecord(type='grid')
 
-    rec = pytdlpack.TdlpackRecord(
-        date=idate,
-        id=recid,
-        lead=ilead,
-        plain=plain,
-        missing_value=tdlp_attrs["pmiss"],
-        grid=griddef,
-        data=data.T,
-    )
-    rec.pack(dec_scale=tdlp_attrs["decimal_scale_factor"])
+    # grid def, section 3
+    for item, val in griddef_co.items():
+        setattr(rec, item, val)
+
+    rec.name = plain
+    rec.refDate = pd.to_datetime(idate, format=("%Y%m%d%H"))
+    rec.id = recid
+    rec.decScaleFactor = tdlp_attrs["decimal_scale_factor"]
+    rec.data = data
+
+    rec.pack()
 
     return rec
