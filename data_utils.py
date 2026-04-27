@@ -309,11 +309,13 @@ def write_to_files(
         MISSING_VAL = config["tdlpack_encoding"]["pmiss"]
         qpf01_expand_tdlpack = np.nan_to_num(qpf01_expand, MISSING_VAL)
 
-        t_out = pytdlpack.open(tdlpack_fileout, mode="w", format="sequential")
+        t_out = tdlpackio.open(tdlpack_fileout, mode="w", format="sequential")
         ilead = [item.astype("int") for item in qpf01_leads]
 
         for il in range(len(ilead)):
-            rec = create_tdlpack_record(config, "qpf", init_date, ilead[il], nbmco, qpf01_expand_tdlpack[0,il])
+            rec = create_tdlpack_record(
+                config, "qpf", init_date, ilead[il], qpf01_expand_tdlpack[0, il]
+            )
             t_out.write(rec)
 
         t_out.close()
@@ -370,15 +372,15 @@ def create_tdlpack_record(
     MM_TO_IN = 1.0 / IN_TO_MM
 
     griddef_co = {
-    "mapProjection": 3,
-    "nx": 2345,
-    "ny": 1597,
-    "latitudeLowerLeft": 19.2290,
-    "longitudeLowerLeft": 126.2766,
-    "standardLatitude": 25.0000,
-    "orientationLongitude": 95.0000,
-    "gridLength": 2539.702881,
-            }
+        "mapProjection": 3,
+        "nx": 2345,
+        "ny": 1597,
+        "latitudeLowerLeft": 19.2290,
+        "longitudeLowerLeft": 126.2766,
+        "standardLatitude": 25.0000,
+        "orientationLongitude": 95.0000,
+        "gridLength": 2539.702881,
+    }
 
     if msg_type != "qpf":
         print("[DATA_UTILS/TDLPACK]: CAN ONLY WRITE OUT QPF RECORDS.")
@@ -389,7 +391,7 @@ def create_tdlpack_record(
 
     recid = [id1, id2, id3, id4]
 
-    rec = tdlpackio.TdlpackRecord(type='grid')
+    rec = tdlpackio.TdlpackRecord(type="grid")
 
     # grid def, section 3
     for item, val in griddef_co.items():
